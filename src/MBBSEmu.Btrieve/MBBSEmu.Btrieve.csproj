@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net6.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <Description>A library for loading and reading data from Btrieve .DAT files saved using Btrieve 5</Description>
+    <Copyright>2022 Nusbaum Consulting, LLC</Copyright>
+    <PackageProjectUrl>https://github.com/mbbsemu/mbbsemu.btrieve</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/mbbsemu/mbbsemu.btrieve</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <NeutralLanguage>en-US</NeutralLanguage>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="6.0.7" />
+    <PackageReference Include="Microsoft.Extensions.Logging" Version="6.0.0" />
+  </ItemGroup>
+
+</Project>
