@@ -1,4 +1,6 @@
-﻿namespace MBBSEmu.Btrieve.Enums
+﻿using System;
+
+namespace MBBSEmu.Btrieve.Enums
 {
     /// <summary>
     ///     Btrieve Key Attribute BitMask used on Key Definitions

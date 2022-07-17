@@ -1,8 +1,12 @@
+using System;
 using MBBSEmu.Btrieve.Cache;
 using MBBSEmu.Btrieve.Enums;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Logging;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
 using System.Text;
 
 namespace MBBSEmu.Btrieve
@@ -154,7 +158,7 @@ namespace MBBSEmu.Btrieve
                 path += Path.DirectorySeparatorChar;
 
             var loadedFileName = $"{path}{fileName}";
-            
+
 
             // If a .DB version exists, load it over the .DAT file
             var fullPathDAT = Path.Combine(path, loadedFileName);
@@ -1193,7 +1197,8 @@ namespace MBBSEmu.Btrieve
 
         public SqliteCommand GetSqliteCommand(string sql, SqliteTransaction transaction = null)
         {
-            var cmd = _sqlCommands.GetOrAdd(sql, sql => {
+            var cmd = _sqlCommands.GetOrAdd(sql, sql =>
+            {
                 var cmd = new SqliteCommand(sql, Connection);
                 cmd.Prepare();
                 return cmd;
@@ -1204,10 +1209,10 @@ namespace MBBSEmu.Btrieve
         }
 
         public static SqliteConnectionStringBuilder GetDefaultConnectionStringBuilder(string filepath) => new()
-            {
-                Mode = SqliteOpenMode.ReadWriteCreate,
-                DataSource = filepath,
-                Pooling = false,
-            };
+        {
+            Mode = SqliteOpenMode.ReadWriteCreate,
+            DataSource = filepath,
+            Pooling = false,
+        };
     }
 }

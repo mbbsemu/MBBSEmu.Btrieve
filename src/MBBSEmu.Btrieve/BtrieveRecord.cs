@@ -1,4 +1,6 @@
-﻿namespace MBBSEmu.Btrieve
+﻿using System;
+
+namespace MBBSEmu.Btrieve
 {
     /// <summary>
     ///     Represents a single Btrieve record within a given Btrieve FIle

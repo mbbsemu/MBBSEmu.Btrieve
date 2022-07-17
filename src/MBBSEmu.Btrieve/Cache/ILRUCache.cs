@@ -1,3 +1,5 @@
+using System.Collections.Generic;
+
 namespace MBBSEmu.Btrieve.Cache;
 
 public interface ILRUCache<TKey, TValue>

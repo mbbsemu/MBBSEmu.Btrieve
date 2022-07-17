@@ -1,4 +1,6 @@
-﻿namespace MBBSEmu.Btrieve
+﻿using System;
+
+namespace MBBSEmu.Btrieve
 {
     /// <summary>
     ///     Represents a Key Record within a Key Location Page

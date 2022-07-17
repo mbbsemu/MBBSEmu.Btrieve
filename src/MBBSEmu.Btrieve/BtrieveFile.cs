@@ -1,4 +1,7 @@
-﻿using MBBSEmu.Btrieve.Enums;
+﻿using System;
+using System.Collections.Generic;
+using System.IO;
+using MBBSEmu.Btrieve.Enums;
 using Microsoft.Extensions.Logging;
 using System.Text;
 

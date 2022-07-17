@@ -1,4 +1,6 @@
-﻿namespace MBBSEmu.Btrieve.Enums
+﻿using System;
+
+namespace MBBSEmu.Btrieve.Enums
 {
     /// <summary>
     ///     Specifies whether the operation code requires a key value.

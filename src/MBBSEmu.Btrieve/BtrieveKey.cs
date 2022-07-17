@@ -1,4 +1,7 @@
-﻿using MBBSEmu.Btrieve.Enums;
+﻿using System;
+using System.Collections.Generic;
+using System.Linq;
+using MBBSEmu.Btrieve.Enums;
 using System.Text;
 
 namespace MBBSEmu.Btrieve
