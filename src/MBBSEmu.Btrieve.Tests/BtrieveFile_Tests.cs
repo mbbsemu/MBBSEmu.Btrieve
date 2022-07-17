@@ -32,6 +32,10 @@ namespace MBBSEmu.Btrieve.Tests
             foreach (var file in _btrieveFiles)
             {
                 File.WriteAllBytes(Path.Combine(_modulePath, file), resourceManager.GetResource($"MBBSEmu.Btrieve.Tests.Assets.{file}").ToArray());
+
+                //Verify Files Copied
+                if (!File.Exists(Path.Combine(_modulePath, file)))
+                    throw new FileNotFoundException($"Test Case File Copy Failed: {Path.Combine(_modulePath, file)}");
             }
         }
 
