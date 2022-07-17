@@ -157,12 +157,9 @@ namespace MBBSEmu.Btrieve
             if (!Path.EndsInDirectorySeparator(path))
                 path += Path.DirectorySeparatorChar;
 
-            var loadedFileName = $"{path}{fileName}";
-
-
             // If a .DB version exists, load it over the .DAT file
-            var fullPathDAT = Path.Combine(path, loadedFileName);
-            var fullPathDB = Path.Combine(path, loadedFileName.ToUpper().Replace(".DAT", ".DB"));
+            var fullPathDAT = Path.Combine(path, fileName);
+            var fullPathDB = Path.Combine(path, fileName.ToUpper().Replace(".DAT", ".DB"));
 
             var fileInfoDAT = new FileInfo(fullPathDAT);
             var fileInfoDB = new FileInfo(fullPathDB);
@@ -183,7 +180,7 @@ namespace MBBSEmu.Btrieve
             else
             {
                 var btrieveFile = new BtrieveFile();
-                btrieveFile.LoadFile(_logger, path, loadedFileName);
+                btrieveFile.LoadFile(_logger, path, fileName);
                 CreateSqliteDB(fullPathDB, btrieveFile);
             }
 
