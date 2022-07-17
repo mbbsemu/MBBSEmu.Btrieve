@@ -1,7 +1,6 @@
 using FluentAssertions;
 using MBBSEmu.Btrieve.Enums;
 using MBBSEmu.Btrieve.Tests.Resources;
-using Microsoft.Extensions.Logging;
 using Xunit;
 
 namespace MBBSEmu.Btrieve.Tests
