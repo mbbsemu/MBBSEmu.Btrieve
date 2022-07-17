@@ -54,6 +54,9 @@ namespace MBBSEmu.Btrieve.Tests
             foreach (var file in files)
             {
                 File.WriteAllBytes(Path.Combine(_modulePath, file), resourceManager.GetResource($"MBBSEmu.Btrieve.Tests.Assets.{file}").ToArray());
+
+                if (!File.Exists(Path.Combine(_modulePath, file)))
+                    throw new FileNotFoundException($"Unable to copy Unit Test Asset: {file}");
             }
         }
 
@@ -311,8 +314,8 @@ namespace MBBSEmu.Btrieve.Tests
 
             using var btrieve = new BtrieveFileProcessor(_modulePath, "MBBSEMU.DAT", CACHE_SIZE)
             {
-                    Position = 3
-                };
+                Position = 3
+            };
 
             btrieve.DeleteAll().Should().BeTrue();
 
@@ -329,8 +332,8 @@ namespace MBBSEmu.Btrieve.Tests
 
             using var btrieve = new BtrieveFileProcessor(_modulePath, "MBBSEMU.DAT", CACHE_SIZE)
             {
-                    Position = 2
-                };
+                Position = 2
+            };
 
             btrieve.Delete().Should().BeTrue();
             btrieve.Delete().Should().BeFalse();
@@ -347,8 +350,8 @@ namespace MBBSEmu.Btrieve.Tests
 
             using var btrieve = new BtrieveFileProcessor(_modulePath, "MBBSEMU.DAT", CACHE_SIZE)
             {
-                    Position = 2
-                };
+                Position = 2
+            };
 
             btrieve.Delete().Should().BeTrue();
 
@@ -1060,15 +1063,15 @@ namespace MBBSEmu.Btrieve.Tests
 
             var key = new BtrieveKey();
             key.Segments.Add(new BtrieveKeyDefinition()
-                {
-                    Number = 0,
-                    Attributes = EnumKeyAttributeMask.NumberedACS | EnumKeyAttributeMask.UseExtendedDataType,
-                    DataType = EnumKeyDataType.Zstring,
-                    Offset = 2,
-                    Length = 30,
-                    Segment = false,
-                    ACS = acs
-                });
+            {
+                Number = 0,
+                Attributes = EnumKeyAttributeMask.NumberedACS | EnumKeyAttributeMask.UseExtendedDataType,
+                DataType = EnumKeyDataType.Zstring,
+                Offset = 2,
+                Length = 30,
+                Segment = false,
+                ACS = acs
+            });
 
             btrieveFile.Keys.Add(0, key);
 
