@@ -14,6 +14,7 @@
 
 		<!-- NuGet settings -->
 		<PackageId>MBBSEmu.Btrieve</PackageId>
+		<PackageVersion>1.0.0</PackageVersion>
 		<PackageTags>Btrieve</PackageTags>
 		<PackageLicenseExpression>MIT</PackageLicenseExpression>
 		<PackageProjectUrl>https://github.com/MBBSEmu/MBBSEmu.Btrieve</PackageProjectUrl>
