@@ -50,6 +50,8 @@ namespace MBBSUtil
                 BtrieveFile file = new BtrieveFile();
                 try
                 {
+                    logger.LogInformation($"Attempting to open {s}");
+
                     file.LoadFile(logger, s);
                     if (convert)
                     {
