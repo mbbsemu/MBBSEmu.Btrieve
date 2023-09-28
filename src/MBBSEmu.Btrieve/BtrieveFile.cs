@@ -30,9 +30,9 @@ namespace MBBSEmu.Btrieve
         {
             get
             {
-                if (Data?.Length > 0)
+                if (_fcr?.Length > 0)
                 {
-                    return (uint)(BitConverter.ToUInt16(Data, 0x1A) << 16) | BitConverter.ToUInt16(Data, 0x1C);
+                    return (uint)(BitConverter.ToUInt16(_fcr, 0x1A) << 16) | BitConverter.ToUInt16(_fcr, 0x1C);
                 }
 
                 return _recordCount;
@@ -62,8 +62,8 @@ namespace MBBSEmu.Btrieve
         {
             get
             {
-                if (Data?.Length > 0)
-                    return BitConverter.ToUInt16(Data, 0x16);
+                if (_fcr?.Length > 0)
+                    return BitConverter.ToUInt16(_fcr, 0x16);
 
                 return _recordLength;
             }
@@ -84,8 +84,8 @@ namespace MBBSEmu.Btrieve
         {
             get
             {
-                if (Data?.Length > 0)
-                    return BitConverter.ToUInt16(Data, 0x18);
+                if (_fcr?.Length > 0)
+                    return BitConverter.ToUInt16(_fcr, 0x18);
 
                 return _physicalRecordLength;
             }
@@ -129,8 +129,8 @@ namespace MBBSEmu.Btrieve
         {
             get
             {
-                if (Data?.Length > 0)
-                    return BitConverter.ToUInt16(Data, 0x14);
+                if (_fcr?.Length > 0)
+                    return BitConverter.ToUInt16(_fcr, 0x14);
 
                 return _keyCount;
             }
@@ -184,7 +184,7 @@ namespace MBBSEmu.Btrieve
         /// </summary>
         public HashSet<uint> DeletedRecordOffsets { get; set; }
 
-        private byte[] _fcr = new byte[512];
+        private byte[] _fcr;
 
         public BtrieveFile()
         {
@@ -231,17 +231,15 @@ namespace MBBSEmu.Btrieve
 #if DEBUG
             logger?.LogInformation($"Opened {fileName} and read {Data.Length} bytes");
 #endif
-            if (!v6)
+            if (v6)
             {
-                DeletedRecordOffsets = GetRecordPointerList(GetRecordPointer(0x10));
-
-                LoadACS(logger, v6);
+                LoadPAT(logger);
             }
             else
             {
-                LoadPAT(logger);
+                DeletedRecordOffsets = GetRecordPointerList(GetRecordPointer(0x10));
 
-                LoadACS(logger, v6);
+                LoadACS(logger, v6, -1);
             }
 
 
@@ -266,20 +264,25 @@ namespace MBBSEmu.Btrieve
 
             logger?.LogInformation(v6 ? "v6" : "v5");
 
+            if (PageLength < 512 || (PageLength & 0x1FF) != 0)
+                return (false, v6, $"Invalid PageLength, must be multiple of 512 {FileName}");
+
+            _fcr = new byte[PageLength];
+
             if (v6)
             {
                 // check the usage count to find the active FCR
                 var usageCount1 = Data[4] | Data[5] << 8 | Data[6] << 16 | Data[7] << 24;
-                var usageCount2 = Data[512 + 4] | Data[512 + 5] << 8 | Data[512 + 6] << 16 | Data[512 + 7] << 24;
+                var usageCount2 = Data[PageLength + 4] | Data[PageLength + 5] << 8 | Data[PageLength + 6] << 16 | Data[PageLength + 7] << 24;
                 // get the FCR
                 if (usageCount1 > usageCount2)
-                    Data.AsSpan().Slice(0, 512).CopyTo(_fcr.AsSpan());
+                    Data.AsSpan().Slice(0, PageLength).CopyTo(_fcr.AsSpan());
                 else
-                    Data.AsSpan().Slice(512, 512).CopyTo(_fcr.AsSpan());
+                    Data.AsSpan().Slice(PageLength, PageLength).CopyTo(_fcr.AsSpan());
             }
             else
             {
-                Data.AsSpan().Slice(0, 512).CopyTo(_fcr.AsSpan());
+                Data.AsSpan().Slice(0, PageLength).CopyTo(_fcr.AsSpan());
 
                 var versionCode = Data[6] << 16 | Data[7];
                 switch (versionCode)
@@ -296,9 +299,6 @@ namespace MBBSEmu.Btrieve
                 if (needsRecovery)
                     return (false, v6, $"Cannot import Btrieve database {FileName} since it's marked inconsistent and needs recovery.");
             }
-
-            if (PageLength < 512 || (PageLength & 0x1FF) != 0)
-                return (false, v6, $"Invalid PageLength, must be multiple of 512 {FileName}");
 
             var accelFlags = BitConverter.ToUInt16(_fcr.AsSpan().Slice(0xA, 2));
             if (accelFlags != 0)
@@ -379,9 +379,10 @@ namespace MBBSEmu.Btrieve
 
             var totalKeys = KeyCount;
             var currentKeyNumber = (ushort)0;
+            var keyOffset = keyOffsets[currentKeyNumber];
             while (currentKeyNumber < totalKeys)
             {
-                var data = Data.AsSpan().Slice(keyOffsets[currentKeyNumber], keyDefinitionLength).ToArray();
+                var data = Data.AsSpan().Slice(keyOffset, keyDefinitionLength).ToArray();
 
                 EnumKeyDataType dataType;
                 var attributes = (EnumKeyAttributeMask) BitConverter.ToUInt16(data, 0x8);
@@ -401,8 +402,11 @@ namespace MBBSEmu.Btrieve
                     NullValue = data[0x1D],
                   };
 
+                // TODO(paladine): support multiple ACS
                 if (keyDefinition.RequiresACS)
                 {
+                    int acs = data[0x19] << 16 | data[0x1A] | data[0x1B] << 8;
+
                     if (ACS == null)
                         throw new ArgumentException($"Key {keyDefinition.Number} requires ACS, but none was read. This database is likely corrupt: {FileName}");
 
@@ -411,7 +415,17 @@ namespace MBBSEmu.Btrieve
 
                 //If it's a segmented key, don't increment so the next key gets added to the same ordinal as an additional segment
                 if (!keyDefinition.Segment)
-                    currentKeyNumber++;
+                {
+                    ++currentKeyNumber;
+                    if (v6 && currentKeyNumber < totalKeys)
+                        keyOffset = keyOffsets[currentKeyNumber];
+                    else
+                        keyOffset += keyDefinitionLength;
+                }
+                else
+                {
+                    keyOffset += keyDefinitionLength;
+                }
 
 #if DEBUG
                 logger?.LogInformation("----------------");
@@ -452,25 +466,64 @@ namespace MBBSEmu.Btrieve
 
         private void LoadPAT(ILogger logger)
         {
-            Span<Byte> pat1 = Data.AsSpan().Slice(1024, PageLength);
-            Span<Byte> pat2 = Data.AsSpan().Slice(1024 + PageLength, PageLength);
-            // check out the usage count to find active pat1/2
+            Span<Byte> pat1 = Data.AsSpan().Slice(PageLength * 2, PageLength);
+            Span<Byte> pat2 = Data.AsSpan().Slice(PageLength * 3, PageLength);
 
+            if (pat1[0] != 'P' || pat1[1] != 'P')
+                throw new ArgumentException($"PAT1 table is invalid: {FileName}");
+            if (pat2[0] != 'P' || pat2[1] != 'P')
+                throw new ArgumentException($"PAT2 table is invalid: {FileName}");
+
+            // check out the usage count to find active pat1/2
+            var usageCount1 = pat1[4] | pat1[5] << 8 | pat1[6] << 16 | pat1[7] << 24;
+            var usageCount2 = pat2[4] | pat2[5] << 8 | pat2[6] << 16 | pat2[7] << 24;
             // scan page type code to find ACS/Index/etc pages
+            Span<Byte> activePat = (usageCount1 > usageCount2) ? pat1 : pat2;
+            var sequenceNumber = activePat[2] << 8 | activePat[3];
+
+            // enumerate all pages
+            for (int i = 8; i < PageLength; i += 4)
+            {
+                byte type = activePat[i + 1];
+                int pageNumber = activePat[i] << 16 | activePat[i + 2] | activePat[i + 3] << 8;
+                // codes are 'A' for ACS, D for fixed-length data pages, E for extra pages and V for variable length pages
+                // index have high bit set
+                if ((type & 0x80) != 0)
+                    continue;
+
+                if (type == 'A')
+                    LoadACS(logger, true, pageNumber);
+
+                if (type != 0 && type != 'A' && type != 'D' && type != 'E' && type != 'V')
+                    throw new ArgumentException($"Bad PAT entry: {FileName}");
+            }
         }
 
-        private bool LoadACS(ILogger logger, bool v6)
+        private bool LoadACS(ILogger logger, bool v6, int pageNumber)
         {
-            // ACS page immediately follows FCR (the first)
-            var offset = PageLength;
-            var data = Data.AsSpan().Slice(offset);
+            if (!v6)
+            {
+                // ACS page immediately follows FCR (the first)
+                pageNumber = 1;
+            }
+            var data = Data.AsSpan().Slice(pageNumber * PageLength, PageLength);
 
-            var pageHeader = data.Slice(0, ACS_PAGE_HEADER.Length);
-            if (!pageHeader.SequenceEqual(ACS_PAGE_HEADER))
-                return false;
+            if (v6)
+            {
+                if (data[1] != 'A' && data[6] != 0xAC)
+                    throw new ArgumentException($"Bad v6 ACS header: {FileName}");
+            }
+            else
+            {
+                var pageHeader = data.Slice(0, ACS_PAGE_HEADER.Length);
+                if (!pageHeader.SequenceEqual(ACS_PAGE_HEADER))
+                    return false;
+            }
 
-            // read the acs data
-            ACSName = Encoding.ASCII.GetString(data.Slice(7, 9)).TrimEnd((char)0);
+            if (ACS != null)
+                throw new ArgumentException($"Database has multiple ACS - NYI: {FileName}");
+
+            ACSName = Encoding.ASCII.GetString(data.Slice(7, 9)).TrimEnd((char)0).TrimEnd(' ');
             ACS = data.Slice(0xF, 256).ToArray();
             return true;
         }
@@ -481,12 +534,13 @@ namespace MBBSEmu.Btrieve
         private void LoadBtrieveRecords(ILogger logger, bool v6)
         {
             var recordsLoaded = 0;
+            var recordsInPage = ((PageLength - 6) / PhysicalRecordLength);
+            uint dataOffset = v6 ? 2u : 0u;
 
             //Starting at 1, since the first page is the header
             for (var i = 1; i <= PageCount; i++)
             {
                 var pageOffset = (uint)(PageLength * i);
-                var recordsInPage = ((PageLength - 6) / PhysicalRecordLength);
 
                 //Verify Data Page, high bit set on byte 5 (usage count)
                 if ((Data[pageOffset + 0x5] & 0x80) == 0)
@@ -497,7 +551,7 @@ namespace MBBSEmu.Btrieve
                 for (var j = 0; j < recordsInPage; j++)
                 {
                     if (recordsLoaded == RecordCount)
-                        break;
+                        goto finished_loaded;
 
                     var recordOffset = (uint)pageOffset + (uint)(PhysicalRecordLength * j);
                     // Marked for deletion? Skip
@@ -505,11 +559,11 @@ namespace MBBSEmu.Btrieve
                         continue;
 
                     var record = Data.AsSpan().Slice((int)recordOffset, PhysicalRecordLength);
-                    if (IsUnusedRecord(record))
+                    if (IsUnusedRecord(record, v6))
                         break;
 
                     var recordArray = new byte[RecordLength];
-                    Array.Copy(Data, recordOffset, recordArray, 0, RecordLength);
+                    Array.Copy(Data, recordOffset + dataOffset, recordArray, 0, RecordLength);
 
                     if (VariableLengthRecords)
                     {
@@ -525,6 +579,7 @@ namespace MBBSEmu.Btrieve
                 }
             }
 
+finished_loaded:
             if (recordsLoaded != RecordCount)
             {
                 logger?.LogWarning($"Database {FileName} contains {RecordCount} records but only read {recordsLoaded}!");
@@ -540,8 +595,15 @@ namespace MBBSEmu.Btrieve
         ///     <para/>Fixed length records are contiguous in the page, and unused records are all zero except
         ///     for the first 4 bytes, which is a record pointer to the next free page.
         /// </summary>
-        private bool IsUnusedRecord(ReadOnlySpan<byte> fixedRecordData)
+        private bool IsUnusedRecord(ReadOnlySpan<byte> fixedRecordData, bool v6)
         {
+            if (v6)
+            {
+                // first two bytes are usage count, which will be non-zero if used
+                var usageCount = fixedRecordData[0] << 8 | fixedRecordData[1];
+                return usageCount == 0;
+            }
+
             if (BitConverter.ToUInt32(fixedRecordData.Slice(4)) == 0)
             {
                 // additional validation, to ensure the record pointer is valid
@@ -608,7 +670,7 @@ namespace MBBSEmu.Btrieve
             var (offset, nextPointerExists) = GetPageOffsetFromFragmentArray(page.Slice((int)offsetPointer, 2));
 
             // to compute length, keep going until I read the next valid fragment and get its offset
-            // then we subtract the two offets to compute length
+            // then we subtract the two offsets to compute length
             var nextFragmentOffset = offsetPointer;
             var nextOffset = 0xFFFFFFFFu;
             for (var i = fragment + 1; i <= numFragments; ++i)
