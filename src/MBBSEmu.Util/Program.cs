@@ -52,7 +52,7 @@ namespace MBBSUtil
                 {
                     logger.LogInformation($"Attempting to open {s}");
 
-                    file.LoadFile(logger, s);
+                    file.LoadFile(logger, s, true);
                     if (convert)
                     {
                         using var processor = new BtrieveFileProcessor();

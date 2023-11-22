@@ -4,6 +4,8 @@ using System.IO;
 using MBBSEmu.Btrieve.Enums;
 using Microsoft.Extensions.Logging;
 using System.Text;
+using System.ComponentModel;
+using System.Net.Mail;
 
 namespace MBBSEmu.Btrieve
 {
@@ -53,6 +55,8 @@ namespace MBBSEmu.Btrieve
         ///     Whether the records are variable length
         /// </summary>
         public bool VariableLengthRecords { get; set; }
+
+        public bool VariableLengthTruncation { get; set; }
 
         private ushort _recordLength;
         /// <summary>
@@ -143,6 +147,16 @@ namespace MBBSEmu.Btrieve
             }
         }
 
+        public ushort DupOffset
+        {
+            get => BitConverter.ToUInt16(_fcr, 0x72);
+        }
+
+        public byte NumDupes
+        {
+            get => _fcr[0x74];
+        }
+
         /// <summary>
         ///     The ACS table name used by the database. null if there is none
         /// </summary>
@@ -196,7 +210,7 @@ namespace MBBSEmu.Btrieve
         /// <summary>
         ///     Loads a Btrieve .DAT File
         /// </summary>
-        public void LoadFile(ILogger logger, string path, string fileName)
+        public void LoadFile(ILogger logger, string path, string fileName, bool allowCorruptedRecords = false)
         {
             //Sanity Check if we're missing .DAT files and there are available .VIR files that can be used
             var virginFileName = fileName.ToUpper().Replace(".DAT", ".VIR");
@@ -216,7 +230,7 @@ namespace MBBSEmu.Btrieve
             LoadFile(logger, Path.Combine(path, fileName));
         }
 
-        public void LoadFile(ILogger logger, string fullPath)
+        public void LoadFile(ILogger logger, string fullPath, bool allowCorruptedRecords = false)
         {
             var fileName = Path.GetFileName(fullPath);
             var fileData = File.ReadAllBytes(fullPath);
@@ -247,7 +261,7 @@ namespace MBBSEmu.Btrieve
 
             //Only load records if there are any present
             if (RecordCount > 0)
-                LoadBtrieveRecords(logger, v6);
+                LoadBtrieveRecords(logger, v6, allowCorruptedRecords);
         }
 
         /// <summary>
@@ -309,6 +323,7 @@ namespace MBBSEmu.Btrieve
                 return (false, v6, $"Data is compressed, cannot handle {FileName}");
 
             VariableLengthRecords = ((usrflgs & 0x1) != 0);
+            VariableLengthTruncation = ((usrflgs & 0x2) != 0);
             var recordsContainVariableLength = (_fcr[0x38] == 0xFF);
 
             if (VariableLengthRecords ^ recordsContainVariableLength)
@@ -475,8 +490,8 @@ namespace MBBSEmu.Btrieve
                 throw new ArgumentException($"PAT2 table is invalid: {FileName}");
 
             // check out the usage count to find active pat1/2
-            var usageCount1 = pat1[4] | pat1[5] << 8 | pat1[6] << 16 | pat1[7] << 24;
-            var usageCount2 = pat2[4] | pat2[5] << 8 | pat2[6] << 16 | pat2[7] << 24;
+            var usageCount1 = BitConverter.ToUInt16(pat1.Slice(4));
+            var usageCount2 = BitConverter.ToUInt16(pat2.Slice(4));
             // scan page type code to find ACS/Index/etc pages
             Span<Byte> activePat = (usageCount1 > usageCount2) ? pat1 : pat2;
             var sequenceNumber = activePat[2] << 8 | activePat[3];
@@ -531,7 +546,7 @@ namespace MBBSEmu.Btrieve
         /// <summary>
         ///     Loads Btrieve Records from Data Pages
         /// </summary>
-        private void LoadBtrieveRecords(ILogger logger, bool v6)
+        private void LoadBtrieveRecords(ILogger logger, bool v6, bool allowCorruptedRecords)
         {
             var recordsLoaded = 0;
             var recordsInPage = ((PageLength - 6) / PhysicalRecordLength);
@@ -562,19 +577,29 @@ namespace MBBSEmu.Btrieve
                     if (IsUnusedRecord(record, v6))
                         break;
 
+                    recordOffset += dataOffset;
                     var recordArray = new byte[RecordLength];
-                    Array.Copy(Data, recordOffset + dataOffset, recordArray, 0, RecordLength);
+                    Array.Copy(Data, recordOffset, recordArray, 0, RecordLength);
 
-                    if (VariableLengthRecords)
+                    try
                     {
-                        using var stream = new MemoryStream();
-                        stream.Write(recordArray);
+                        if (VariableLengthRecords)
+                        {
+                            using var stream = new MemoryStream();
+                            stream.Write(recordArray);
 
-                        Records.Add(new BtrieveRecord(recordOffset, GetVariableLengthData(recordOffset, stream)));
+                            Records.Add(new BtrieveRecord(recordOffset, GetVariableLengthData(recordOffset, stream, v6)));
+                        }
+                        else
+                            Records.Add(new BtrieveRecord(recordOffset, recordArray));
                     }
-                    else
-                        Records.Add(new BtrieveRecord(recordOffset, recordArray));
+                    catch (ArgumentException ex)
+                    {
+                        if (!allowCorruptedRecords)
+                            throw ex;
 
+                        logger?.LogWarning(ex, $"Detected a corrupted data record - skipping");
+                    }
                     recordsLoaded++;
                 }
             }
@@ -615,13 +640,55 @@ finished_loaded:
             return false;
         }
 
+        private int LogicalPageToPhysicalOffset(uint logicalPage, bool v6)
+        {
+            if (!v6)
+                return (int) logicalPage * PageLength;
+
+            // go through the PAT
+            uint ret = 2;
+            uint pagesPerPAT = (PageLength / 4u) - 2u;
+
+            // not on the current page? if so page up
+            while (logicalPage > pagesPerPAT)
+            {
+                logicalPage -= pagesPerPAT;
+                ret += (PageLength / 4u);
+            }
+
+            uint pat1 = ret * PageLength;
+            uint pat2 = pat1 + PageLength;
+            // pick the one with best usage count
+            if (Data[pat1] != 'P' && Data[pat1 + 1] != 'P' && Data[pat2] != 'P' && Data[pat2 + 1] != 'P')
+                throw new ArgumentException("Not a pat");
+
+            var spanPat1 = Data.AsSpan().Slice((int) pat1 + 4, 4);
+            var spanPat2 = Data.AsSpan().Slice((int) pat2 + 4, 4);
+            var usageCount1 = BitConverter.ToUInt32(spanPat1);
+            var usageCount2 = BitConverter.ToUInt32(spanPat2);
+            var activePatOffset = (usageCount1 > usageCount2) ? pat1 : pat2;
+
+            var spanPatTable = Data.AsSpan().Slice((int) activePatOffset + 8);
+            var patTableEntry = ret + 8 + (logicalPage * 4);
+            // now we have our pointer at ret
+            var page = Data.AsSpan().Slice((int) patTableEntry, 4);
+            ret = ((uint) page[0] << 16) | ((uint) page[3] << 8) | ((uint) page[2]);
+            var typeCode = page[1];
+            if (typeCode != 'V')
+                throw new ArgumentException("Variable data page reference isn't a variable data page");
+            if (ret * PageLength >= Data.Length)
+                throw new ArgumentException("Variable page reference overflows max pages");
+
+            return (int) ret * PageLength;
+        }
+
         /// <summary>
         ///     Gets the complete variable length data from the specified <paramref name="recordOffset"/>,
         ///     walking through all data pages and returning the concatenated data.
         /// </summary>
         /// <param name="first">Fixed record pointer offset of the record from a data page</param>
         /// <param name="stream">MemoryStream containing the fixed record data already read.</param>
-        private byte[] GetVariableLengthData(uint recordOffset, MemoryStream stream) {
+        private byte[] GetVariableLengthData(uint recordOffset, MemoryStream stream, bool v6) {
             var variableData = Data.AsSpan().Slice((int)recordOffset + RecordLength, PhysicalRecordLength - RecordLength);
             var vrecPage = GetPageFromVariableLengthRecordPointer(variableData);
             var vrecFragment = variableData[3];
@@ -632,7 +699,7 @@ finished_loaded:
                     return stream.ToArray();
 
                 // jump to that page
-                var vpage = Data.AsSpan().Slice((int)vrecPage * PageLength, PageLength);
+                var vpage = Data.AsSpan().Slice(LogicalPageToPhysicalOffset(vrecPage, v6), PageLength);
                 var numFragmentsInPage = BitConverter.ToUInt16(vpage.Slice(0xA, 2));
                 // grab the fragment pointer
                 var (offset, length, nextPointerExists) = GetFragment(vpage, vrecFragment, numFragmentsInPage);
@@ -668,6 +735,10 @@ finished_loaded:
         {
             var offsetPointer = (uint)PageLength - 2u * (fragment + 1u);
             var (offset, nextPointerExists) = GetPageOffsetFromFragmentArray(page.Slice((int)offsetPointer, 2));
+
+            // check offset for corruption now?
+            if (offset < 0xC)
+                return (0, 0, false);
 
             // to compute length, keep going until I read the next valid fragment and get its offset
             // then we subtract the two offsets to compute length
