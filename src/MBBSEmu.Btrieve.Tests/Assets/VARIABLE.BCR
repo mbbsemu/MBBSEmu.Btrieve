@@ -1,0 +1,4 @@
+record=8 variable=y key=2 page=512
+
+position=5 length=2 duplicates=y modifiable=n type=int alternate=n null=n segment=n
+position=7 length=2 duplicates=n modifiable=n type=int alternate=n null=n segment=n

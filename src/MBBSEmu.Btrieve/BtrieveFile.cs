@@ -4,6 +4,8 @@ using System.IO;
 using MBBSEmu.Btrieve.Enums;
 using Microsoft.Extensions.Logging;
 using System.Text;
+using System.ComponentModel;
+using System.Net.Mail;
 
 namespace MBBSEmu.Btrieve
 {
@@ -30,9 +32,9 @@ namespace MBBSEmu.Btrieve
         {
             get
             {
-                if (Data?.Length > 0)
+                if (_fcr?.Length > 0)
                 {
-                    return (uint)(BitConverter.ToUInt16(Data, 0x1A) << 16) | BitConverter.ToUInt16(Data, 0x1C);
+                    return (uint)(BitConverter.ToUInt16(_fcr, 0x1A) << 16) | BitConverter.ToUInt16(_fcr, 0x1C);
                 }
 
                 return _recordCount;
@@ -54,6 +56,8 @@ namespace MBBSEmu.Btrieve
         /// </summary>
         public bool VariableLengthRecords { get; set; }
 
+        public bool VariableLengthTruncation { get; set; }
+
         private ushort _recordLength;
         /// <summary>
         ///     Defined Length of the records within the Btrieve File
@@ -62,8 +66,8 @@ namespace MBBSEmu.Btrieve
         {
             get
             {
-                if (Data?.Length > 0)
-                    return BitConverter.ToUInt16(Data, 0x16);
+                if (_fcr?.Length > 0)
+                    return BitConverter.ToUInt16(_fcr, 0x16);
 
                 return _recordLength;
             }
@@ -84,8 +88,8 @@ namespace MBBSEmu.Btrieve
         {
             get
             {
-                if (Data?.Length > 0)
-                    return BitConverter.ToUInt16(Data, 0x18);
+                if (_fcr?.Length > 0)
+                    return BitConverter.ToUInt16(_fcr, 0x18);
 
                 return _physicalRecordLength;
             }
@@ -129,8 +133,8 @@ namespace MBBSEmu.Btrieve
         {
             get
             {
-                if (Data?.Length > 0)
-                    return BitConverter.ToUInt16(Data, 0x14);
+                if (_fcr?.Length > 0)
+                    return BitConverter.ToUInt16(_fcr, 0x14);
 
                 return _keyCount;
             }
@@ -141,6 +145,16 @@ namespace MBBSEmu.Btrieve
 
                 _keyCount = value;
             }
+        }
+
+        public ushort DupOffset
+        {
+            get => BitConverter.ToUInt16(_fcr, 0x72);
+        }
+
+        public byte NumDupes
+        {
+            get => _fcr[0x74];
         }
 
         /// <summary>
@@ -184,6 +198,8 @@ namespace MBBSEmu.Btrieve
         /// </summary>
         public HashSet<uint> DeletedRecordOffsets { get; set; }
 
+        private byte[] _fcr;
+
         public BtrieveFile()
         {
             Records = new List<BtrieveRecord>();
@@ -194,7 +210,7 @@ namespace MBBSEmu.Btrieve
         /// <summary>
         ///     Loads a Btrieve .DAT File
         /// </summary>
-        public void LoadFile(ILogger logger, string path, string fileName)
+        public void LoadFile(ILogger logger, string path, string fileName, bool allowCorruptedRecords = false)
         {
             //Sanity Check if we're missing .DAT files and there are available .VIR files that can be used
             var virginFileName = fileName.ToUpper().Replace(".DAT", ".VIR");
@@ -214,7 +230,7 @@ namespace MBBSEmu.Btrieve
             LoadFile(logger, Path.Combine(path, fileName));
         }
 
-        public void LoadFile(ILogger logger, string fullPath)
+        public void LoadFile(ILogger logger, string fullPath, bool allowCorruptedRecords = false)
         {
             var fileName = Path.GetFileName(fullPath);
             var fileData = File.ReadAllBytes(fullPath);
@@ -222,69 +238,98 @@ namespace MBBSEmu.Btrieve
             FileName = fullPath;
             Data = fileData;
 
-            var (valid, errorMessage) = ValidateDatabase();
+            var (valid, v6, errorMessage) = ValidateDatabase(logger);
             if (!valid)
                 throw new ArgumentException($"Failed to load database {FileName}: {errorMessage}");
 
 #if DEBUG
             logger?.LogInformation($"Opened {fileName} and read {Data.Length} bytes");
 #endif
-            DeletedRecordOffsets = GetRecordPointerList(GetRecordPointer(0x10));
+            if (v6)
+            {
+                LoadPAT(logger);
+            }
+            else
+            {
+                DeletedRecordOffsets = GetRecordPointerList(GetRecordPointer(0x10));
 
-            LoadACS(logger);
-            LoadBtrieveKeyDefinitions(logger);
+                LoadACS(logger, v6, -1);
+            }
+
+
+            LoadBtrieveKeyDefinitions(logger, v6);
 
             //Only load records if there are any present
             if (RecordCount > 0)
-                LoadBtrieveRecords(logger);
+                LoadBtrieveRecords(logger, v6, allowCorruptedRecords);
         }
 
         /// <summary>
         ///     Validates the Btrieve database being loaded
         /// </summary>
         /// <returns>True if valid. If false, the string is the error message.</returns>
-        private (bool isValid, string errorMessage) ValidateDatabase()
+        private (bool isValid, bool v6, string errorMessage) ValidateDatabase(ILogger logger)
         {
             if (Data.Length < 2)
-                return (false, $"Btrieve File Is Empty/Invalid Length ({Data.Length} bytes)");
-            if (Data[0] == 'F' && Data[1] == 'C')
-                return (false, $"Cannot import v6 Btrieve database {FileName} - only v5 databases are supported for now. Please contact your ISV for a downgraded database.");
+                return (false, false, $"Btrieve File Is Empty/Invalid Length ({Data.Length} bytes)");
+            bool v6 = (Data[0] == 'F' && Data[1] == 'C' && Data[2] == 0 && Data[3] == 0);
             if (Data[0] != 0 && Data[1] != 0 && Data[2] != 0 && Data[3] != 0)
-                return (false, $"Doesn't appear to be a v5 Btrieve database {FileName}");
+                return (false, false, $"Doesn't appear to be a v5 Btrieve database {FileName}");
 
-            var versionCode = Data[6] << 16 | Data[7];
-            switch (versionCode)
-            {
-                case 3:
-                case 4:
-                case 5:
-                    break;
-                default:
-                    return (false, $"Invalid version code [{versionCode}] in v5 Btrieve database {FileName}");
-            }
-
-            var needsRecovery = (Data[0x22] == 0xFF && Data[0x23] == 0xFF);
-            if (needsRecovery)
-                return (false, $"Cannot import Btrieve database {FileName} since it's marked inconsistent and needs recovery.");
+            logger?.LogInformation(v6 ? "v6" : "v5");
 
             if (PageLength < 512 || (PageLength & 0x1FF) != 0)
-                return (false, $"Invalid PageLength, must be multiple of 512 {FileName}");
+                return (false, v6, $"Invalid PageLength, must be multiple of 512 {FileName}");
 
-            var accelFlags = BitConverter.ToUInt16(Data.AsSpan().Slice(0xA, 2));
+            _fcr = new byte[PageLength];
+
+            if (v6)
+            {
+                // check the usage count to find the active FCR
+                var usageCount1 = Data[4] | Data[5] << 8 | Data[6] << 16 | Data[7] << 24;
+                var usageCount2 = Data[PageLength + 4] | Data[PageLength + 5] << 8 | Data[PageLength + 6] << 16 | Data[PageLength + 7] << 24;
+                // get the FCR
+                if (usageCount1 > usageCount2)
+                    Data.AsSpan().Slice(0, PageLength).CopyTo(_fcr.AsSpan());
+                else
+                    Data.AsSpan().Slice(PageLength, PageLength).CopyTo(_fcr.AsSpan());
+            }
+            else
+            {
+                Data.AsSpan().Slice(0, PageLength).CopyTo(_fcr.AsSpan());
+
+                var versionCode = Data[6] << 16 | Data[7];
+                switch (versionCode)
+                {
+                    case 3:
+                    case 4:
+                    case 5:
+                        break;
+                    default:
+                        return (false, v6, $"Invalid version code [{versionCode}] in v5 Btrieve database {FileName}");
+                }
+
+                var needsRecovery = (_fcr[0x22] == 0xFF && _fcr[0x23] == 0xFF);
+                if (needsRecovery)
+                    return (false, v6, $"Cannot import Btrieve database {FileName} since it's marked inconsistent and needs recovery.");
+            }
+
+            var accelFlags = BitConverter.ToUInt16(_fcr.AsSpan().Slice(0xA, 2));
             if (accelFlags != 0)
-                return (false, $"Valid accel flags, expected 0, got {accelFlags}! {FileName}");
+                return (false, v6, $"Valid accel flags, expected 0, got {accelFlags}! {FileName}");
 
-            var usrflgs = BitConverter.ToUInt16(Data.AsSpan().Slice(0x106, 2));
+            var usrflgs = BitConverter.ToUInt16(_fcr.AsSpan().Slice(0x106, 2));
             if ((usrflgs & 0x8) != 0)
-                return (false, $"Data is compressed, cannot handle {FileName}");
+                return (false, v6, $"Data is compressed, cannot handle {FileName}");
 
             VariableLengthRecords = ((usrflgs & 0x1) != 0);
-            var recordsContainVariableLength = (Data[0x38] == 0xFF);
+            VariableLengthTruncation = ((usrflgs & 0x2) != 0);
+            var recordsContainVariableLength = (_fcr[0x38] == 0xFF);
 
             if (VariableLengthRecords ^ recordsContainVariableLength)
-                return (false, "Mismatched variable length fields");
+                return (false, v6, "Mismatched variable length fields");
 
-            return (true, "");
+            return (true, v6, "");
         }
 
         /// <summary>
@@ -323,19 +368,36 @@ namespace MBBSEmu.Btrieve
         /// <summary>
         ///     Loads Btrieve Key Definitions from the Btrieve DAT File Header
         /// </summary>
-        private void LoadBtrieveKeyDefinitions(ILogger logger)
+        private void LoadBtrieveKeyDefinitions(ILogger logger, bool v6)
         {
-            var keyDefinitionBase = 0x110;
             const ushort keyDefinitionLength = 0x1E;
-            var btrieveFileContentSpan = Data.AsSpan();
 
-            LogKeyPresent = (btrieveFileContentSpan[0x10C] == 1);
+            LogKeyPresent = (_fcr[0x10C] == 1);
+
+            int[] keyOffsets = new int[KeyCount];
+            if (v6)
+            {
+                if (_fcr[0x76] != KeyCount)
+                    throw new ArgumentException($"Key number in KAT mismatches earlier key count: {FileName}");
+
+                var katOffset = _fcr[0x78] | _fcr[0x79] << 8;
+
+                for (int i = 0; i < KeyCount; ++i, katOffset += 2)
+                    keyOffsets[i] = Data[katOffset] | Data[katOffset + 1] << 8;
+            }
+            else
+            {
+                const int keyDefinitionBase = 0x110;
+                for (int i = 0; i < KeyCount; ++i)
+                    keyOffsets[i] = keyDefinitionBase + (i * keyDefinitionLength);
+            }
 
             var totalKeys = KeyCount;
             var currentKeyNumber = (ushort)0;
+            var keyOffset = keyOffsets[currentKeyNumber];
             while (currentKeyNumber < totalKeys)
             {
-                var data = btrieveFileContentSpan.Slice(keyDefinitionBase, keyDefinitionLength).ToArray();
+                var data = Data.AsSpan().Slice(keyOffset, keyDefinitionLength).ToArray();
 
                 EnumKeyDataType dataType;
                 var attributes = (EnumKeyAttributeMask) BitConverter.ToUInt16(data, 0x8);
@@ -355,8 +417,11 @@ namespace MBBSEmu.Btrieve
                     NullValue = data[0x1D],
                   };
 
+                // TODO(paladine): support multiple ACS
                 if (keyDefinition.RequiresACS)
                 {
+                    int acs = data[0x19] << 16 | data[0x1A] | data[0x1B] << 8;
+
                     if (ACS == null)
                         throw new ArgumentException($"Key {keyDefinition.Number} requires ACS, but none was read. This database is likely corrupt: {FileName}");
 
@@ -365,7 +430,17 @@ namespace MBBSEmu.Btrieve
 
                 //If it's a segmented key, don't increment so the next key gets added to the same ordinal as an additional segment
                 if (!keyDefinition.Segment)
-                    currentKeyNumber++;
+                {
+                    ++currentKeyNumber;
+                    if (v6 && currentKeyNumber < totalKeys)
+                        keyOffset = keyOffsets[currentKeyNumber];
+                    else
+                        keyOffset += keyDefinitionLength;
+                }
+                else
+                {
+                    keyOffset += keyDefinitionLength;
+                }
 
 #if DEBUG
                 logger?.LogInformation("----------------");
@@ -389,8 +464,6 @@ namespace MBBSEmu.Btrieve
                 {
                     key.Segments.Add(keyDefinition);
                 }
-
-                keyDefinitionBase += keyDefinitionLength;
             }
 
             // update segment indices
@@ -406,18 +479,66 @@ namespace MBBSEmu.Btrieve
 
         private readonly byte[] ACS_PAGE_HEADER = { 0, 0, 1, 0, 0, 0, 0xAC };
 
-        private bool LoadACS(ILogger logger)
+        private void LoadPAT(ILogger logger)
         {
-            // ACS page immediately follows FCR (the first)
-            var offset = PageLength;
-            var data = Data.AsSpan().Slice(offset);
+            Span<Byte> pat1 = Data.AsSpan().Slice(PageLength * 2, PageLength);
+            Span<Byte> pat2 = Data.AsSpan().Slice(PageLength * 3, PageLength);
 
-            var pageHeader = data.Slice(0, ACS_PAGE_HEADER.Length);
-            if (!pageHeader.SequenceEqual(ACS_PAGE_HEADER))
-                return false;
+            if (pat1[0] != 'P' || pat1[1] != 'P')
+                throw new ArgumentException($"PAT1 table is invalid: {FileName}");
+            if (pat2[0] != 'P' || pat2[1] != 'P')
+                throw new ArgumentException($"PAT2 table is invalid: {FileName}");
 
-            // read the acs data
-            ACSName = Encoding.ASCII.GetString(data.Slice(7, 9)).TrimEnd((char)0);
+            // check out the usage count to find active pat1/2
+            var usageCount1 = BitConverter.ToUInt16(pat1.Slice(4));
+            var usageCount2 = BitConverter.ToUInt16(pat2.Slice(4));
+            // scan page type code to find ACS/Index/etc pages
+            Span<Byte> activePat = (usageCount1 > usageCount2) ? pat1 : pat2;
+            var sequenceNumber = activePat[2] << 8 | activePat[3];
+
+            // enumerate all pages
+            for (int i = 8; i < PageLength; i += 4)
+            {
+                byte type = activePat[i + 1];
+                int pageNumber = activePat[i] << 16 | activePat[i + 2] | activePat[i + 3] << 8;
+                // codes are 'A' for ACS, D for fixed-length data pages, E for extra pages and V for variable length pages
+                // index have high bit set
+                if ((type & 0x80) != 0)
+                    continue;
+
+                if (type == 'A')
+                    LoadACS(logger, true, pageNumber);
+
+                if (type != 0 && type != 'A' && type != 'D' && type != 'E' && type != 'V')
+                    throw new ArgumentException($"Bad PAT entry: {FileName}");
+            }
+        }
+
+        private bool LoadACS(ILogger logger, bool v6, int pageNumber)
+        {
+            if (!v6)
+            {
+                // ACS page immediately follows FCR (the first)
+                pageNumber = 1;
+            }
+            var data = Data.AsSpan().Slice(pageNumber * PageLength, PageLength);
+
+            if (v6)
+            {
+                if (data[1] != 'A' && data[6] != 0xAC)
+                    throw new ArgumentException($"Bad v6 ACS header: {FileName}");
+            }
+            else
+            {
+                var pageHeader = data.Slice(0, ACS_PAGE_HEADER.Length);
+                if (!pageHeader.SequenceEqual(ACS_PAGE_HEADER))
+                    return false;
+            }
+
+            if (ACS != null)
+                throw new ArgumentException($"Database has multiple ACS - NYI: {FileName}");
+
+            ACSName = Encoding.ASCII.GetString(data.Slice(7, 9)).TrimEnd((char)0).TrimEnd(' ');
             ACS = data.Slice(0xF, 256).ToArray();
             return true;
         }
@@ -425,15 +546,16 @@ namespace MBBSEmu.Btrieve
         /// <summary>
         ///     Loads Btrieve Records from Data Pages
         /// </summary>
-        private void LoadBtrieveRecords(ILogger logger)
+        private void LoadBtrieveRecords(ILogger logger, bool v6, bool allowCorruptedRecords)
         {
             var recordsLoaded = 0;
+            var recordsInPage = ((PageLength - 6) / PhysicalRecordLength);
+            uint dataOffset = v6 ? 2u : 0u;
 
             //Starting at 1, since the first page is the header
             for (var i = 1; i <= PageCount; i++)
             {
                 var pageOffset = (uint)(PageLength * i);
-                var recordsInPage = ((PageLength - 6) / PhysicalRecordLength);
 
                 //Verify Data Page, high bit set on byte 5 (usage count)
                 if ((Data[pageOffset + 0x5] & 0x80) == 0)
@@ -444,7 +566,7 @@ namespace MBBSEmu.Btrieve
                 for (var j = 0; j < recordsInPage; j++)
                 {
                     if (recordsLoaded == RecordCount)
-                        break;
+                        goto finished_loaded;
 
                     var recordOffset = (uint)pageOffset + (uint)(PhysicalRecordLength * j);
                     // Marked for deletion? Skip
@@ -452,26 +574,37 @@ namespace MBBSEmu.Btrieve
                         continue;
 
                     var record = Data.AsSpan().Slice((int)recordOffset, PhysicalRecordLength);
-                    if (IsUnusedRecord(record))
+                    if (IsUnusedRecord(record, v6))
                         break;
 
+                    recordOffset += dataOffset;
                     var recordArray = new byte[RecordLength];
                     Array.Copy(Data, recordOffset, recordArray, 0, RecordLength);
 
-                    if (VariableLengthRecords)
+                    try
                     {
-                        using var stream = new MemoryStream();
-                        stream.Write(recordArray);
+                        if (VariableLengthRecords)
+                        {
+                            using var stream = new MemoryStream();
+                            stream.Write(recordArray);
 
-                        Records.Add(new BtrieveRecord(recordOffset, GetVariableLengthData(recordOffset, stream)));
+                            Records.Add(new BtrieveRecord(recordOffset, GetVariableLengthData(recordOffset, stream, v6)));
+                        }
+                        else
+                            Records.Add(new BtrieveRecord(recordOffset, recordArray));
                     }
-                    else
-                        Records.Add(new BtrieveRecord(recordOffset, recordArray));
+                    catch (ArgumentException ex)
+                    {
+                        if (!allowCorruptedRecords)
+                            throw ex;
 
+                        logger?.LogWarning(ex, $"Detected a corrupted data record - skipping");
+                    }
                     recordsLoaded++;
                 }
             }
 
+finished_loaded:
             if (recordsLoaded != RecordCount)
             {
                 logger?.LogWarning($"Database {FileName} contains {RecordCount} records but only read {recordsLoaded}!");
@@ -487,8 +620,15 @@ namespace MBBSEmu.Btrieve
         ///     <para/>Fixed length records are contiguous in the page, and unused records are all zero except
         ///     for the first 4 bytes, which is a record pointer to the next free page.
         /// </summary>
-        private bool IsUnusedRecord(ReadOnlySpan<byte> fixedRecordData)
+        private bool IsUnusedRecord(ReadOnlySpan<byte> fixedRecordData, bool v6)
         {
+            if (v6)
+            {
+                // first two bytes are usage count, which will be non-zero if used
+                var usageCount = fixedRecordData[0] << 8 | fixedRecordData[1];
+                return usageCount == 0;
+            }
+
             if (BitConverter.ToUInt32(fixedRecordData.Slice(4)) == 0)
             {
                 // additional validation, to ensure the record pointer is valid
@@ -500,13 +640,55 @@ namespace MBBSEmu.Btrieve
             return false;
         }
 
+        private int LogicalPageToPhysicalOffset(uint logicalPage, bool v6)
+        {
+            if (!v6)
+                return (int) logicalPage * PageLength;
+
+            // go through the PAT
+            uint ret = 2;
+            uint pagesPerPAT = (PageLength / 4u) - 2u;
+
+            // not on the current page? if so page up
+            while (logicalPage > pagesPerPAT)
+            {
+                logicalPage -= pagesPerPAT;
+                ret += (PageLength / 4u);
+            }
+
+            uint pat1 = ret * PageLength;
+            uint pat2 = pat1 + PageLength;
+            // pick the one with best usage count
+            if (Data[pat1] != 'P' && Data[pat1 + 1] != 'P' && Data[pat2] != 'P' && Data[pat2 + 1] != 'P')
+                throw new ArgumentException("Not a pat");
+
+            var spanPat1 = Data.AsSpan().Slice((int) pat1 + 4, 4);
+            var spanPat2 = Data.AsSpan().Slice((int) pat2 + 4, 4);
+            var usageCount1 = BitConverter.ToUInt32(spanPat1);
+            var usageCount2 = BitConverter.ToUInt32(spanPat2);
+            var activePatOffset = (usageCount1 > usageCount2) ? pat1 : pat2;
+
+            var spanPatTable = Data.AsSpan().Slice((int) activePatOffset + 8);
+            var patTableEntry = ret + 8 + (logicalPage * 4);
+            // now we have our pointer at ret
+            var page = Data.AsSpan().Slice((int) patTableEntry, 4);
+            ret = ((uint) page[0] << 16) | ((uint) page[3] << 8) | ((uint) page[2]);
+            var typeCode = page[1];
+            if (typeCode != 'V')
+                throw new ArgumentException("Variable data page reference isn't a variable data page");
+            if (ret * PageLength >= Data.Length)
+                throw new ArgumentException("Variable page reference overflows max pages");
+
+            return (int) ret * PageLength;
+        }
+
         /// <summary>
         ///     Gets the complete variable length data from the specified <paramref name="recordOffset"/>,
         ///     walking through all data pages and returning the concatenated data.
         /// </summary>
         /// <param name="first">Fixed record pointer offset of the record from a data page</param>
         /// <param name="stream">MemoryStream containing the fixed record data already read.</param>
-        private byte[] GetVariableLengthData(uint recordOffset, MemoryStream stream) {
+        private byte[] GetVariableLengthData(uint recordOffset, MemoryStream stream, bool v6) {
             var variableData = Data.AsSpan().Slice((int)recordOffset + RecordLength, PhysicalRecordLength - RecordLength);
             var vrecPage = GetPageFromVariableLengthRecordPointer(variableData);
             var vrecFragment = variableData[3];
@@ -517,7 +699,7 @@ namespace MBBSEmu.Btrieve
                     return stream.ToArray();
 
                 // jump to that page
-                var vpage = Data.AsSpan().Slice((int)vrecPage * PageLength, PageLength);
+                var vpage = Data.AsSpan().Slice(LogicalPageToPhysicalOffset(vrecPage, v6), PageLength);
                 var numFragmentsInPage = BitConverter.ToUInt16(vpage.Slice(0xA, 2));
                 // grab the fragment pointer
                 var (offset, length, nextPointerExists) = GetFragment(vpage, vrecFragment, numFragmentsInPage);
@@ -554,8 +736,12 @@ namespace MBBSEmu.Btrieve
             var offsetPointer = (uint)PageLength - 2u * (fragment + 1u);
             var (offset, nextPointerExists) = GetPageOffsetFromFragmentArray(page.Slice((int)offsetPointer, 2));
 
+            // check offset for corruption now?
+            if (offset < 0xC)
+                return (0, 0, false);
+
             // to compute length, keep going until I read the next valid fragment and get its offset
-            // then we subtract the two offets to compute length
+            // then we subtract the two offsets to compute length
             var nextFragmentOffset = offsetPointer;
             var nextOffset = 0xFFFFFFFFu;
             for (var i = fragment + 1; i <= numFragments; ++i)

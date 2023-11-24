@@ -1,14 +1,16 @@
 using FluentAssertions;
 using MBBSEmu.Btrieve.Enums;
 using MBBSEmu.Btrieve.Tests.Resources;
+using SQLitePCL;
 using Xunit;
+using Xunit.Sdk;
 
 namespace MBBSEmu.Btrieve.Tests
 {
     [Collection("Non-Parallel")]
     public class BtrieveFile_Tests : TestBase, IDisposable
     {
-        private readonly string[] _btrieveFiles = { "MBBSEMU.DAT" };
+        private readonly string[] _btrieveFiles = { "MBBSEMU.DAT", "VARIABLE.DAT" };
 
         protected readonly string _modulePath;
 
@@ -100,6 +102,64 @@ namespace MBBSEmu.Btrieve.Tests
                     Length = 4,
                     Segment = false,
                 });
+        }
+
+        [Fact]
+        public void LoadsVariableLengthFile()
+        {
+
+            var btrieve = new BtrieveFile();
+            btrieve.LoadFile(null, _modulePath, "VARIABLE.DAT");
+
+            Assert.Equal(2, btrieve.KeyCount);
+            Assert.Equal(2, btrieve.Keys.Count);
+            Assert.Equal(8, btrieve.RecordLength);
+            Assert.Equal(1024u, btrieve.RecordCount);
+            Assert.Equal(20, btrieve.PhysicalRecordLength);
+            Assert.Equal(512, btrieve.PageLength);
+            Assert.False(btrieve.LogKeyPresent);
+            Assert.True(btrieve.VariableLengthRecords);
+
+            Assert.Single(btrieve.Keys[0].Segments);
+            Assert.Single(btrieve.Keys[1].Segments);
+
+
+            btrieve.Keys[0].PrimarySegment.Should().BeEquivalentTo(
+                new BtrieveKeyDefinition()
+                {
+                    Number = 0,
+                    Attributes = EnumKeyAttributeMask.Duplicates | EnumKeyAttributeMask.UseExtendedDataType,
+                    DataType = EnumKeyDataType.Integer,
+                    Offset = 4,
+                    Length = 2,
+                    Segment = false,
+                });
+            btrieve.Keys[1].PrimarySegment.Should().BeEquivalentTo(
+                new BtrieveKeyDefinition()
+                {
+                    Number = 1,
+                    Attributes = EnumKeyAttributeMask.UseExtendedDataType,
+                    DataType = EnumKeyDataType.Integer,
+                    Offset = 6,
+                    Length = 2,
+                    Segment = false,
+                });
+
+            btrieve.Records.Count.Should().Be(1024);
+            for (int i = 0; i < btrieve.Records.Count; ++i)
+            {
+                byte[] data = btrieve.Records[i].Data;
+                BitConverter.ToUInt32(data).Should().Be(0xDEADBEEF);
+                BitConverter.ToUInt16(data.AsSpan(4, 2)).Should().Be((ushort)(i % 64));
+                BitConverter.ToUInt16(data.AsSpan(6, 2)).Should().Be((ushort) i);
+
+                Span<Byte> variableLengthData = data.AsSpan(8);
+                variableLengthData.Length.Should().Be(i);
+                for (int j = 0; j < i; ++j)
+                {
+                    variableLengthData[j].Should().Be((byte) j);
+                }
+            }
         }
     }
 }
